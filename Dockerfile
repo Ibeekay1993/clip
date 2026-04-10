@@ -9,9 +9,10 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Fix: Upgrade pip/setuptools first
+# Fix: Install pkg_resources first
 COPY requirements.txt .
 RUN pip install --upgrade pip setuptools wheel
+RUN pip install setuptools-scm  # Add this line
 RUN pip install -r requirements.txt
 
 COPY main.py .
