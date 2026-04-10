@@ -503,6 +503,14 @@ async def analyze_video(video_id: str):
         raise HTTPException(status_code=500, detail=str(error))
 
 
+@app.get("/video/{video_id}")
+async def stream_video(video_id: str):
+    path = get_local_video_path(video_id)
+    if not path:
+      raise HTTPException(status_code=404, detail="Video not found")
+    return FileResponse(path, media_type="video/mp4", filename=path.name)
+
+
 @app.get("/status/{video_id}")
 async def job_status(video_id: str):
     analysis = load_analysis_metadata(video_id)
