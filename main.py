@@ -54,8 +54,15 @@ HOOK_PHRASES = [
     "how to",
 ]
 
-print("Loading Whisper model...")
-model = whisper.load_model("base")
+_WHISPER_MODEL = None
+
+
+def get_whisper_model():
+    global _WHISPER_MODEL
+    if _WHISPER_MODEL is None:
+        print("Loading Whisper model...")
+        _WHISPER_MODEL = whisper.load_model("base")
+    return _WHISPER_MODEL
 
 
 def ffprobe_duration(path: Path) -> float:
@@ -161,6 +168,20 @@ def download_video_source(video_url: str, source_id: Optional[str] = None) -> Pa
     raise HTTPException(status_code=400, detail="Unable to download the provided video URL")
 
 
+def fetch_video_metadata(video_url: str) -> dict[str, Any]:
+    try:
+        with yt_dlp.YoutubeDL({"quiet": True, "skip_download": True, "no_warnings": True}) as ydl:
+            info = ydl.extract_info(video_url, download=False)
+            return {
+                "title": info.get("title"),
+                "uploader": info.get("uploader"),
+                "duration": info.get("duration"),
+                "webpage_url": info.get("webpage_url") or video_url,
+            }
+    except Exception:
+        return {"title": None, "uploader": None, "duration": None, "webpage_url": video_url}
+
+
 def format_srt_time(seconds: float) -> str:
     hours = int(seconds // 3600)
     minutes = int((seconds % 3600) // 60)
@@ -179,7 +200,7 @@ class VideoProcessor:
             self.duration = 0.0
 
     def transcribe(self) -> list[dict[str, Any]]:
-        result = model.transcribe(str(self.path), word_timestamps=True)
+        result = get_whisper_model().transcribe(str(self.path), word_timestamps=True)
         words: list[dict[str, Any]] = []
 
         for segment in result.get("segments", []):
@@ -434,18 +455,19 @@ async def process_url(request: Request):
             raise HTTPException(status_code=400, detail="url is required")
 
         video_id = str(uuid.uuid4())
+        metadata = fetch_video_metadata(str(url))
         local_path = download_video_source(str(url), video_id)
-        processor = VideoProcessor(local_path)
-        transcription = processor.transcribe()
-        scenes = processor.detect_scenes()
-        clips = processor.suggest_clips(transcription, scenes, clip_count=10)
+        duration = ffprobe_duration(local_path) or float(metadata.get("duration") or 0)
         analysis = {
             "video_id": video_id,
-            "duration": processor.duration,
-            "transcription": transcription,
-            "scenes": scenes,
-            "clips": clips,
+            "duration": duration,
+            "transcription": [],
+            "scenes": [],
+            "clips": [],
             "source_url": url,
+            "title": metadata.get("title"),
+            "uploader": metadata.get("uploader"),
+            "status": "downloaded",
         }
         save_analysis_metadata(video_id, analysis)
 
@@ -453,10 +475,11 @@ async def process_url(request: Request):
             content={
                 "success": True,
                 "video_id": video_id,
-                "duration": processor.duration,
-                "clips": clips,
-                "transcription": transcription,
+                "duration": duration,
+                "clips": [],
+                "transcription": [],
                 "source_url": url,
+                "title": metadata.get("title"),
             }
         )
     except Exception as error:
@@ -486,6 +509,10 @@ async def analyze_video(video_id: str):
         if not path:
             raise HTTPException(status_code=404, detail="Video not found")
 
+        existing_analysis = load_analysis_metadata(video_id)
+        if existing_analysis and existing_analysis.get("status") == "complete" and existing_analysis.get("clips"):
+            return existing_analysis
+
         processor = VideoProcessor(path)
         transcription = processor.transcribe()
         scenes = processor.detect_scenes()
@@ -496,6 +523,10 @@ async def analyze_video(video_id: str):
             "transcription": transcription,
             "scenes": scenes,
             "clips": clips,
+            "source_url": existing_analysis.get("source_url") if existing_analysis else None,
+            "title": existing_analysis.get("title") if existing_analysis else None,
+            "uploader": existing_analysis.get("uploader") if existing_analysis else None,
+            "status": "complete",
         }
         save_analysis_metadata(video_id, analysis)
         return analysis
@@ -518,7 +549,7 @@ async def job_status(video_id: str):
         return {"success": True, "status": "pending", "video_id": video_id}
     return {
         "success": True,
-        "status": "complete",
+        "status": analysis.get("status", "complete"),
         "video_id": video_id,
         "duration": analysis.get("duration", 0),
         "clip_count": len(analysis.get("clips", [])),
